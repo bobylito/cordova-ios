@@ -106,11 +106,17 @@
 {
     [super viewWillAppear:animated];
 
+    __weak CDVViewController* weakSelf = self;
+    
     NSNotificationCenter* nc = [NSNotificationCenter defaultCenter];
-    [nc addObserver:self
-           selector:@selector(keyboardWillShowOrHide:)
-               name:UIKeyboardWillShowNotification
-             object:nil];
+    [nc addObserverForName:UIKeyboardWillShowNotification
+                    object:nil
+                     queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification * notification) {
+                    // we can't hide it here because the accessory bar hasn't been created yet, so we delay on the queue
+                    [weakSelf performSelector:@selector(keyboardWillShowOrHide:) withObject:notification afterDelay:0];
+                }
+     ];
     [nc addObserver:self
            selector:@selector(keyboardWillShowOrHide:)
                name:UIKeyboardWillHideNotification
@@ -128,7 +134,14 @@
 
 - (void)keyboardWillShowOrHide:(NSNotification*)notif
 {
-    if (![@"true" isEqualToString : self.settings[@"KeyboardShrinksView"]]) {
+    if (![@"true" isEqualToString:self.settings[@"KeyboardShrinksView"]]) {
+        if ([@"true" isEqualToString:self.settings[@"HideKeyboardFormAccessoryBar"]]) {
+            float height = [self hideKeyboardFormAccessoryBar];
+            
+            CGRect newFrame = self.webView.scrollView.frame;
+            newFrame.size.height += height;
+            self.webView.scrollView.frame = newFrame;
+        }
         return;
     }
     BOOL showEvent = [notif.name isEqualToString:UIKeyboardWillShowNotification];
@@ -138,10 +151,24 @@
 
     CGRect newFrame = self.view.bounds;
     if (showEvent) {
-        newFrame.size.height -= keyboardFrame.size.height;
+        if ([@"true" isEqualToString:self.settings[@"HideKeyboardFormAccessoryBar"]]) {
+            float height = [self hideKeyboardFormAccessoryBar];
+            
+            newFrame.size.height -= ( keyboardFrame.size.height - height );
+            
+            self.webView.frame = newFrame;
+            self.webView.scrollView.contentInset = UIEdgeInsetsMake(0, 0, -keyboardFrame.size.height, 0);
+        }
+        else {
+            newFrame.size.height -= keyboardFrame.size.height;
+            self.webView.frame = newFrame;
+            self.webView.scrollView.contentInset = UIEdgeInsetsMake(0, 0, -keyboardFrame.size.height, 0);
+        }
     }
-    self.webView.frame = newFrame;
-    self.webView.scrollView.contentInset = UIEdgeInsetsMake(0, 0, -keyboardFrame.size.height, 0);
+    else {
+        self.webView.frame = newFrame;
+        self.webView.scrollView.contentInset = UIEdgeInsetsMake(0, 0, -keyboardFrame.size.height, 0);
+    }
 }
 
 - (void)printDeprecationNotice
@@ -284,24 +311,25 @@
         NSLog(@"Deprecated: The 'EnableLocation' boolean property is deprecated in 2.5.0, and will be removed in 3.0.0. Use the 'onload' boolean attribute (of the CDVLocation plugin.");
         [[self.commandDelegate getCommandInstance:@"Geolocation"] getLocation:[CDVInvokedUrlCommand new]];
     }
-
+/*
     if (hideKeyboardFormAccessoryBar) {
         __weak CDVViewController* weakSelf = self;
         [[NSNotificationCenter defaultCenter] addObserverForName:UIKeyboardWillShowNotification
                                                           object:nil
                                                            queue:[NSOperationQueue mainQueue]
-                                                      usingBlock:^(NSNotification* notification) {
-            // we can't hide it here because the accessory bar hasn't been created yet, so we delay on the queue
-            [weakSelf performSelector:@selector(hideKeyboardFormAccessoryBar) withObject:nil afterDelay:0];
-        }];
+                                                      usingBlock:^(NSNotification * notification) {
+                // we can't hide it here because the accessory bar hasn't been created yet, so we delay on the queue
+                [weakSelf performSelector:@selector(hideKeyboardFormAccessoryBar) withObject:nil afterDelay:0];
+            }];
     }
+ */
 
     /*
      * Fire up CDVLocalStorage to work-around WebKit storage limitations: on all iOS 5.1+ versions for local-only backups, but only needed on iOS 5.1 for cloud backup.
      */
-    if (IsAtLeastiOSVersion(@"5.1") && (([backupWebStorageType isEqualToString:@"local"]) ||
-        ([backupWebStorageType isEqualToString:@"cloud"] && !IsAtLeastiOSVersion(@"6.0")))) {
-        [self registerPlugin:[[CDVLocalStorage alloc] initWithWebView:self.webView] withClassName:NSStringFromClass([CDVLocalStorage class])];
+    if (IsAtLeastiOSVersion (@"5.1") && (([backupWebStorageType isEqualToString:@"local"]) ||
+            ([backupWebStorageType isEqualToString:@"cloud"] && !IsAtLeastiOSVersion (@"6.0")))) {
+        [self registerPlugin:[[CDVLocalStorage alloc] initWithWebView:self.webView] withClassName:NSStringFromClass ([CDVLocalStorage class])];
     }
 
     /*
@@ -342,7 +370,7 @@
     /*
      * iOS 6.0 UIWebView properties
      */
-    if (IsAtLeastiOSVersion(@"6.0")) {
+    if (IsAtLeastiOSVersion (@"6.0")) {
         BOOL keyboardDisplayRequiresUserAction = YES; // KeyboardDisplayRequiresUserAction - defaults to YES
         if ([self.settings objectForKey:@"KeyboardDisplayRequiresUserAction"] != nil) {
             if ([self.settings objectForKey:@"KeyboardDisplayRequiresUserAction"]) {
@@ -368,16 +396,8 @@
         }
     }
 
-    if ([self.startupPluginNames count] > 0) {
-        [CDVTimer start:@"TotalPluginStartup"];
-
-        for (NSString* pluginName in self.startupPluginNames) {
-            [CDVTimer start:pluginName];
-            [self getCommandInstance:pluginName];
-            [CDVTimer stop:pluginName];
-        }
-
-        [CDVTimer stop:@"TotalPluginStartup"];
+    for (NSString* pluginName in self.startupPluginNames) {
+        [self getCommandInstance:pluginName];
     }
 
     // TODO: Remove this explicit instantiation once we move to cordova-CLI.
@@ -387,21 +407,22 @@
 
     // /////////////////
     [CDVUserAgentUtil acquireLock:^(NSInteger lockToken) {
-        _userAgentLockToken = lockToken;
-        [CDVUserAgentUtil setUserAgent:self.userAgent lockToken:lockToken];
-        if (!loadErr) {
-            NSURLRequest* appReq = [NSURLRequest requestWithURL:appURL cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:20.0];
-            [self.webView loadRequest:appReq];
-        } else {
-            NSString* html = [NSString stringWithFormat:@"<html><body> %@ </body></html>", loadErr];
-            [self.webView loadHTMLString:html baseURL:nil];
-        }
-    }];
+            _userAgentLockToken = lockToken;
+            [CDVUserAgentUtil setUserAgent:self.userAgent lockToken:lockToken];
+            if (!loadErr) {
+                NSURLRequest* appReq = [NSURLRequest requestWithURL:appURL cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:20.0];
+                [self.webView loadRequest:appReq];
+            } else {
+                NSString* html = [NSString stringWithFormat:@"<html><body> %@ </body></html>", loadErr];
+                [self.webView loadHTMLString:html baseURL:nil];
+            }
+        }];
 }
 
-- (void)hideKeyboardFormAccessoryBar
+- (float)hideKeyboardFormAccessoryBar
 {
     NSArray* windows = [[UIApplication sharedApplication] windows];
+    float webFormAccessoryHeight = 0;
 
     for (UIWindow* window in windows) {
         for (UIView* view in window.subviews) {
@@ -409,10 +430,11 @@
                 for (UIView* peripheralView in view.subviews) {
                     // hides the accessory bar
                     if ([[peripheralView description] hasPrefix:@"<UIWebFormAccessory"]) {
+                        webFormAccessoryHeight = peripheralView.frame.size.height;
                         // remove the extra scroll space for the form accessory bar
-                        CGRect newFrame = self.webView.scrollView.frame;
-                        newFrame.size.height += peripheralView.frame.size.height;
-                        self.webView.scrollView.frame = newFrame;
+                        //CGRect newFrame = self.webView.scrollView.frame;
+                        //newFrame.size.height += webFormAccessoryHeight;
+                        //self.webView.scrollView.frame = newFrame;
 
                         // remove the form accessory bar
                         [peripheralView removeFromSuperview];
@@ -425,6 +447,8 @@
             }
         }
     }
+    
+    return webFormAccessoryHeight;
 }
 
 - (NSArray*)parseInterfaceOrientations:(NSArray*)orientations
@@ -791,7 +815,7 @@
 
     id obj = [self.pluginObjects objectForKey:className];
     if (!obj) {
-        obj = [[NSClassFromString(className)alloc] initWithWebView:webView];
+        obj = [[NSClassFromString (className)alloc] initWithWebView:webView];
 
         if (obj != nil) {
             [self registerPlugin:obj withClassName:className];
